@@ -1,0 +1,5 @@
+channel_multiplier: 1
+size: 256
+latent_dim_style: 512
+latent_dim_motion: 20
+dataset: 'vox'

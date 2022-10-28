@@ -1,0 +1,66 @@
+env:
+    raw_path: '/input/Experiment/data'
+    checkpoint_path: '/input/checkpoints'
+    proc_path: '/input/Experiment/proc'
+    res_path: 'res'
+const:
+    SUCCESS: 1
+    FAILED: 0
+config:
+    common:
+        checkpoints:
+            landmark_model:
+                dir: '@checkpoint_path/landmark'
+            model:
+                model: '@checkpoint_path/lia/vox.pt'
+                config: 
+                    channel_multiplier: 1
+                    size: 256
+                    latent_dim_style: 512
+                    latent_dim_motion: 20
+                    dataset: 'vox'
+                    ckpt: '@checkpoint_path/lia/vox.pt'
+                         
+        attr:
+            fps: 25
+    preprocess:
+        input:
+            dir: '@raw_path' 
+        output: 
+            dir: '@proc_path'
+    inference:
+        attr:
+            source_image: ''
+            driving_video: ''
+            result_video: ''
+            driven_dir: ''
+            from_flame: False
+            gen: 'spade'
+            ignore_emotion: True
+            relative: True 
+            adapt_scale: True 
+            find_best_frame: False
+            yaw: None
+            pitch: None
+            roll: None
+            pca_path: "@checkpoint_path/BFv2v/eye_pca.pt"
+        input: 
+            dir: '@proc_path'
+        output:
+            dir: '@res_path'
+dynamic:
+    gpus: [0]
+    mode: 'combination'
+    input_as_file: True
+    inputs:
+        source: 'inputs/source_tmp.txt'
+        driving: 'inputs/driving_tmp.txt'
+    label: 'lia_tmp'
+    rewrite: False
+    save_frames: True
+    processed_inputs: False
+    
+    
+
+
+
