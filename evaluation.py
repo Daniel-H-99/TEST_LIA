@@ -92,37 +92,50 @@ class EvaPipeline(nn.Module):
         # self.loss_fn = lpips.LPIPS(net='alex').cuda()
 
     def inference(self, opt, save_frames):
+        device = 'cuda:0'
+        bs = 1
+        transform = torchvision.transforms.Compose([
+            transforms.Resize((256, 256)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))]
+        )
+        
+        def get_frame(path):
+            x = Image.open(path).convert('RGB')
+            x = transform(x)
+            x = x[None].to(device)
+            return x
+
+        
         driving_frames_path = os.listdir(os.path.join(opt.driving_dir, 'frames'))
         driving_video = []
         fids = []
         for frame_path in driving_frames_path:
-            driving_frame = imageio.imread(os.path.join(opt.driving_dir, 'frames', frame_path))
+            driving_frame = get_frame(os.path.join(opt.driving_dir, 'frames', frame_path))
             driving_video.append(driving_frame)
             fid = int(frame_path.split('.png')[0])
             fids.append(fid)
             
         order = torch.tensor(fids).argsort()
-        driving_video = torch.tensor(np.array([resize(img_as_float32(frame), (256, 256))[..., :3] for frame in driving_video]))[order]
-        driving_video = driving_video.permute(0, 3, 1, 2).float()
+        driving_video = torch.cat(driving_video, dim=0)[order]
         
         if opt.source_dir.endswith('.mp4'):
-            source_image = imageio.imread(os.path.join(opt.source_dir, 'frames', '00000.png'))
+            source_image = get_frame(os.path.join(opt.source_dir, 'frames', '0000000.png'))
         else:
-            source_image = imageio.imread(os.path.join(opt.source_dir, 'image.png'))
+            source_image = get_frame(os.path.join(opt.source_dir, 'image.png'))
 
-        if len(source_image.shape) == 2:
-            source_image = cv2.cvtColor(source_image, cv2.COLOR_GRAY2RGB)
+        # if len(source_image.shape) == 2:
+        #     source_image = cv2.cvtColor(source_image, cv2.COLOR_GRAY2RGB)
 
         frame_shape = (256, 256, 3)
-        source_image = resize(img_as_float32(source_image), frame_shape[:2])[..., :3]
         
-
-        device = 'cuda:0'
-        bs = 1
+        # source_image = frame_transform(source_image)
         
-        source = torch.tensor(source_image[np.newaxis].astype(np.float32)).permute(0, 3, 1, 2).repeat(bs, 1, 1, 1)
-        source = source.to(device)
-
+        # source_image = resize(img_as_float32(source_image), frame_shape[:2])[..., :3]
+        # source = torch.tensor(source_image[np.newaxis].astype(np.float32)).permute(0, 3, 1, 2).repeat(bs, 1, 1, 1)
+        # source = source.to(device)
+        source = source_image
+        
         predictions = []
         for frame_idx in tqdm(range(0, len(driving_video), bs)):
             driving_frame = driving_video[frame_idx:frame_idx+bs].to(device)

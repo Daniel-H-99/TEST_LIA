@@ -15,12 +15,18 @@ import csv
 import torch
 import types
 import glob
+import time
+from tqdm import tqdm
+import logging
+
+
 
 class MetricItem():
-    def __init__(self, name, func, post_fix=''):
+    def __init__(self, name, func, post_fix='', src_label=False):
         self.name = name
         self.func = func
         self.post_fix=post_fix
+        self.src_label = src_label
 
 
 METRIC_META = {
@@ -31,6 +37,8 @@ METRIC_META = {
     'MS-SSIM': MetricItem('MS-SSIM', 'MS_SSIM', 'frames'),
     'AKD': MetricItem('AKD', 'AKD', 'frames'),
     'PSNR': MetricItem('PSNR', 'PSNR', 'frames'),
+    'AED': MetricItem('AED', 'AED', 'frames', True),
+    'AUCON': MetricItem('AUCON', 'AUCON', 'frames')
 }
 
 class AttrDict(dict):
@@ -68,28 +76,67 @@ def read_config(config_path):
 
 def setup_exp(args, config):
 	materials = {}
-	pipeline = THPipeline(config, config.dynamic.gpus)
-	materials['label'] = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-	if config.dynamic.label is not None:
-		materials['label'] = '_'.join([config.dynamic.label, materials['label']])
-	cwd = os.path.join(config.env.res_path, materials['label'])
-	os.makedirs(cwd)
-	shutil.copy(args.config, os.path.join(cwd, 'config.yaml'))
-	os.makedirs(os.path.join(cwd, 'inputs'))
-	os.makedirs(os.path.join(cwd, 'metrics'))
-	test_samples = construct_test_samples(config, cwd=cwd)
-	materials['cwd'] = cwd
-	materials['config'] = config
-	materials['pipeline'] = pipeline
-	materials['test_samples'] = test_samples
-	materials['metric'] = MetricEvaluater(config)
-	materials['metric_names'] = {
-     'same_identity': ['L1', 'FID', 'SSIM', 'LPIPS', 'MS-SSIM', 'AKD', 'PSNR']
-	}
+	if len(config.dynamic.load_exp) == 0:
+		pipeline = THPipeline(config, config.dynamic.gpus)
+		materials['label'] = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+		if config.dynamic.label is not None:
+			materials['label'] = '_'.join([config.dynamic.label, materials['label']])
+		cwd = os.path.join(config.env.res_path, materials['label'])
+		os.makedirs(cwd)
+		shutil.copy(args.config, os.path.join(cwd, 'config.yaml'))
+		os.makedirs(os.path.join(cwd, 'inputs'))
+		os.makedirs(os.path.join(cwd, 'metrics'))
+		test_samples = construct_test_samples(config, cwd=cwd)
+		materials['cwd'] = cwd
+		materials['config'] = config
+		materials['pipeline'] = pipeline
+		materials['test_samples'] = test_samples
+		materials['metric'] = MetricEvaluater(config)
+		materials['metric_names'] = {
+		'same_identity': ['L1', 'FID', 'SSIM', 'LPIPS', 'MS-SSIM', 'AKD', 'PSNR', 'AED'],
+		'cross_identity': ['AED', 'AUCON']
+		}
+		materials['logger'] = make_logger(cwd)
+		materials = AttrDict.from_nested_dicts(materials)
 
-	materials = AttrDict.from_nested_dicts(materials)
+	else:
+		loaded_materials = torch.load(config.dynamic.load_exp)
+
+		materials['config'] = config
+		materials['logger'] = make_logger(loaded_materials.cwd)
+		materials = AttrDict.from_nested_dicts(materials)
+		
+		setattr(loaded_materials, 'metric', MetricEvaluater(loaded_materials.config))
+		setattr(loaded_materials, 'metric_names', AttrDict.from_nested_dicts({
+		'same_identity': ['L1', 'FID', 'SSIM', 'LPIPS', 'MS-SSIM', 'AKD', 'PSNR'],
+		'cross_identity': ['AED', 'AUCON']
+		}))
+  
+		setattr(materials, 'loaded_materials', loaded_materials)
 	
 	return materials
+
+def make_logger(cwd):
+	# 로그 생성
+	logger = logging.getLogger()
+
+	# 로그의 출력 기준 설정
+	logger.setLevel(logging.INFO)
+
+	# log 출력 형식
+	formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+	# log 출력
+	stream_handler = logging.StreamHandler()
+	stream_handler.setFormatter(formatter)
+	logger.addHandler(stream_handler)
+
+	# log를 파일에 출력
+	file_handler = logging.FileHandler(os.path.join(cwd, 'log.log'))
+	file_handler.setFormatter(formatter)
+	logger.addHandler(file_handler)
+ 
+	return logger
 
 def write_scores(scores, materials):
 	output_score_file = os.path.join(materials.cwd, 'metrics', 'scores.csv')
@@ -120,14 +167,14 @@ def write_scores(scores, materials):
 	# 	f.writelines(summary_string)
 
 
-def eval_iter_sessions(func, materials, session_names, post_fix=''):
+def eval_iter_sessions(func, materials, session_names, post_fix='', src_label=False):
 	scores = {}
 	print(f'cwd: {materials.cwd}')
 	print(f'session names: {session_names}')
 	session_dirs = list(map(lambda x: os.path.join(materials.cwd, x), session_names))
 
 	for session_name, session_dir in zip(session_names, session_dirs):
-		inputs = np.loadtxt(os.path.join(session_dir, 'inputs.txt'), dtype=str)
+		inputs = np.loadtxt(os.path.join(session_dir, 'inputs.txt'), dtype=str, comments=None)
 		print(f'inputs: {inputs}')
 		source, driving = inputs
 		# with open(os.path.join(session_dir, 'inputs.txt'), 'r') as f:
@@ -135,23 +182,28 @@ def eval_iter_sessions(func, materials, session_names, post_fix=''):
 
 		# 	print(f'inputs: {inputs}')
    
-
+		label = source if src_label else driving
+  
 		result_path = os.path.join(session_dir, post_fix) if len(post_fix) > 0 else session_name
-		GT_path = os.path.join(driving, post_fix) if len(post_fix) > 0 else driving
+		GT_path = os.path.join(label, post_fix) if len(post_fix) > 0 else driving
   
 		score_session = func(result_path, GT_path).detach().cpu().numpy()
 		scores[session_name] = score_session
 	
 	return scores
 
-def eval_exp(materials, session_names):
+def eval_exp(materials):
 	metric = materials.metric
+	session_names = materials.session_names
 	scores = {}
- 
+	
+	# print(f'dynamic: {materials.config.dynamic}')
+	# metrics = getattr(materials.metric_names, 'cross_identity' if materials.config.dynamic.relative_headpose else 'same_identity')
+	metrics = materials.metric_names.cross_identity
 	### same identity evaluation
-	for metric_name in materials.metric_names.same_identity:
+	for metric_name in tqdm(metrics):
 		meta_info = METRIC_META[metric_name]
-		metric_score = eval_iter_sessions(getattr(metric, meta_info.func), materials, session_names, post_fix=meta_info.post_fix)
+		metric_score = eval_iter_sessions(getattr(metric, meta_info.func), materials, session_names, post_fix=meta_info.post_fix, src_label=meta_info.src_label)
 		scores[metric_name] = metric_score
   
 	write_scores(scores, materials)
@@ -171,25 +223,51 @@ def run_session(config, src, drv, pipeline, label):
 	session_dir = pipeline.inference(src, drv, label, save_frames=config.dynamic.save_frames)
 	return session_dir
 
-
 def run_exp(materials):
-	session_names = []
-	for src, drv in materials.test_samples:
-		print(f'running session: {(src, drv)}')
-		session_name = run_session(materials.config, src, drv, materials.pipeline, materials.label)
-		session_names.append(session_name)
-	
-	### evaluation
-	eval_exp(materials, session_names)
-	
-	setattr(materials, 'result', types.SimpleNamespace())
-	materials.result.session_names = session_names
-	# setattr(materials.result, 'session_names', session_names)
+	if len(materials.config.dynamic.load_exp) == 0:
+		materials.logger.info('running exp...')
+		session_names = []
+		for src, drv in tqdm(materials.test_samples):
+			print(f'running session: {(src, drv)}')
+			session_name = run_session(materials.config, src, drv, materials.pipeline, materials.label)
+			session_names.append(session_name)
+		materials.logger.info('finished exp')
+		setattr(materials, 'session_names', session_names)
+  
+		if not materials.config.dynamic.skip_eval:
+			### evaluation
+			materials.logger.info('running evaluation...')
+			eval_exp(materials)
+			materials.logger.info('finished evaluation')
+		
+		# setattr(materials, 'result', types.SimpleNamespace())
+  
+		# setattr(materials.result, 'session_names', session_names)
 
-	del materials.metric
-	del materials.pipeline
+		del materials.metric
+		del materials.pipeline
+		del materials.logger
+	
+		torch.save(materials, os.path.join(materials.cwd, 'materials.pt'))
+  
+	else:
+		materials.logger.info('loading exp...')
+  
+		### evaluation
+		materials.logger.info('running evaluation...')
+		eval_exp(materials.loaded_materials)
+		materials.logger.info('finished evaluation')
+	
+		# setattr(materials, 'result', types.SimpleNamespace())
+		# materials.result.session_names = session_names
+		# setattr(materials.result, 'session_names', session_names)
 
-	torch.save(materials, os.path.join(materials.cwd, 'materials.pt'))
+		# del materials.metric
+		# del materials.pipeline
+		# del materials.logger
+	
+		# torch.save(materials, os.path.join(materials.cwd, 'materials.pt'))
+
 
 def construct_test_samples(config, cwd=None):
 	samples = []
@@ -227,7 +305,7 @@ def construct_test_samples(config, cwd=None):
 			if '*' in drv:
 				drv = glob.glob(os.path.join(data_dir, drv))
 				drv = list(map(lambda x: os.path.relpath(x, start=data_dir), drv))
-			assert (type(src) == list) * (type(drv) == list), 'src, drv pairs are not matched!'
+			# assert (type(src) == list) * (type(drv) == list), 'src, drv pairs are not matched!'
 			if type(src) == list:
 				for src_item, drv_item in zip(src, drv):
 					samples.append((src_item, drv_item))
@@ -245,13 +323,17 @@ def construct_test_samples(config, cwd=None):
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument('--config', type=str, required=True) 
+ 
 	args, unparsed  = parser.parse_known_args()
 
 	config_path = args.config
 
 	config = read_config(config_path)
+
 	print(f'running with config: {config}')
  
 	materials = setup_exp(args, config)
+	
+	materials.logger.info('exp setup finished')
  
 	run_exp(materials)
